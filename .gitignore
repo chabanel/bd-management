@@ -68,6 +68,12 @@ first_page.png
 
 # BD directories
 bd/
-BD_Organisees/ 
+BD_Organisees/
 
+# Images temporaires (supprimées après traitement)
+images/
+
+# Fichiers d'inventaire
+inventaire_bd.csv
+bd_archive/
 .env
