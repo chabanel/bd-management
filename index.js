@@ -1,16 +1,24 @@
-const fs = require('fs-extra');
-const path = require('path');
-const chalk = require('chalk');
+const fs = require("fs-extra");
+const path = require("path");
+const chalk = require("chalk");
 
 // Import des fonctions PDF
-const { 
-    extractPDFMetadata, 
-    extractFromFileName, 
-    scanDirectory 
-} = require('./pdf.js');
+const {
+  extractPDFMetadata,
+  extractFromFileName,
+  scanDirectory,
+} = require("./pdf.js");
+
+// Import des fonctions de validation web
+const {
+  validateBDInfo,
+  analyzeSearchResults,
+  displayValidationResults,
+} = require("./web-search.js");
 
 // Configuration
 const SOURCE_DIR = "/Users/pcidss/developpement/tri-bd/bd"; // Dossier à scanner - MODIFIEZ ICI
+const ENABLE_WEB_VALIDATION = process.env.ENABLE_WEB_VALIDATION !== "false"; // Validation web activée par défaut
 
 // Statistiques globales
 const stats = {
@@ -93,7 +101,7 @@ async function analyzeFiles(sourceDir, pdfFiles) {
     "Numéro",
     "ISBN",
     "Confiance",
-    "Page analysée",
+    "Page",
     "Date d'analyse",
   ];
 
@@ -106,27 +114,74 @@ async function analyzeFiles(sourceDir, pdfFiles) {
 
       // Vérifier si le fichier a déjà été analysé avec succès
       const existingEntry = existingData[fileName];
-      if (
-        existingEntry &&
-        existingEntry["Titre"] &&
-        existingEntry["Auteur"] &&
-        existingEntry["Auteur"] !== "Auteur Inconnu"
-      ) {
+      let pageNumber = 2; // Valeur par défaut
+
+      if (existingEntry && existingEntry["Titre"] && existingEntry["Auteur"]) {
         console.log(
           chalk.cyan(
             `  ⏭️  Déjà analysé: ${existingEntry["Titre"]} par ${existingEntry["Auteur"]}`
           )
         );
+
+        // Validation web des données existantes si activée
+        if (ENABLE_WEB_VALIDATION) {
+          const searchData = await validateBDInfo(
+            existingEntry["Titre"],
+            existingEntry["Auteur"],
+            existingEntry["ISBN"]
+          );
+
+          if (searchData) {
+            const analysis = analyzeSearchResults(searchData, {
+              title: existingEntry["Titre"],
+              author: existingEntry["Auteur"],
+              isbn: existingEntry["ISBN"],
+            });
+
+            if (analysis) {
+              displayValidationResults(analysis);
+
+              // Mettre à jour la confiance si la validation web confirme
+              if (analysis.confidence > 60) {
+                existingEntry["Confiance"] = Math.max(
+                  parseInt(existingEntry["Confiance"] || 0),
+                  analysis.confidence
+                );
+                console.log(
+                  chalk.green(
+                    `  ✅ Validation web réussie - Confiance mise à jour: ${existingEntry["Confiance"]}%`
+                  )
+                );
+              }
+            }
+          }
+        }
+
         csvData.push(existingEntry);
         stats.processed++;
         if (existingEntry["Auteur"]) {
           stats.authors.add(existingEntry["Auteur"]);
         }
         continue;
+      } else if (existingEntry) {
+        // Si on a une entrée existante mais incomplète, essayer une autre page
+        if (existingEntry["Page"] == 2) {
+          pageNumber = 1;
+        } else if (existingEntry["Page"] == 1) {
+          pageNumber = 3;
+        } else if (existingEntry["Page"] == 3) {
+          // Si on a déjà essayé 3 pages, ne pas continuer
+          console.log(
+            chalk.yellow(
+              `  ⏭️  Déjà essayé 3 pages différentes, passage au suivant`
+            )
+          );
+          continue;
+        }
       }
 
       // Extraire les métadonnées
-      const metadata = await extractPDFMetadata(pdfFile);
+      const metadata = await extractPDFMetadata(pdfFile, pageNumber);
 
       if (!metadata) {
         stats.errors++;
@@ -142,9 +197,46 @@ async function analyzeFiles(sourceDir, pdfFiles) {
         Numéro: metadata.volume || "",
         ISBN: metadata.isbn || "",
         Confiance: metadata.confidence || "",
-        "Page analysée": metadata.pageAnalyzed || "",
+        Page: metadata.pageAnalyzed || "",
         "Date d'analyse": new Date().toISOString(),
       };
+
+      // Validation web des données extraites
+      if (
+        ENABLE_WEB_VALIDATION &&
+        (metadata.title || metadata.author || metadata.isbn)
+      ) {
+        const searchData = await validateBDInfo(
+          metadata.title,
+          metadata.author,
+          metadata.isbn
+        );
+
+        if (searchData) {
+          const analysis = analyzeSearchResults(searchData, {
+            title: metadata.title,
+            author: metadata.author,
+            isbn: metadata.isbn,
+          });
+
+          if (analysis) {
+            displayValidationResults(analysis);
+
+            // Mettre à jour la confiance si la validation web confirme
+            if (analysis.confidence > 60) {
+              csvRow.Confiance = Math.max(
+                parseInt(metadata.confidence || 0),
+                analysis.confidence
+              );
+              console.log(
+                chalk.green(
+                  `  ✅ Validation web réussie - Confiance mise à jour: ${csvRow.Confiance}%`
+                )
+              );
+            }
+          }
+        }
+      }
 
       csvData.push(csvRow);
 
@@ -171,8 +263,32 @@ async function analyzeFiles(sourceDir, pdfFiles) {
   // Créer le fichier CSV
   if (csvData.length > 0) {
     const csvPath = path.join(process.cwd(), "inventaire_bd.csv");
-    await createCSVFile(csvPath, csvHeaders, csvData);
+
+    // Fusionner avec les données existantes pour éviter la perte d'entrées
+    const allData = [];
+
+    // Ajouter d'abord toutes les entrées existantes qui ne sont pas dans csvData
+    for (const fileName in existingData) {
+      const existingEntry = existingData[fileName];
+      const isInNewData = csvData.some(
+        (newEntry) => newEntry["Nom du fichier"] === fileName
+      );
+
+      if (!isInNewData) {
+        allData.push(existingEntry);
+      }
+    }
+
+    // Ajouter les nouvelles données
+    allData.push(...csvData);
+
+    await createCSVFile(csvPath, csvHeaders, allData);
     console.log(chalk.blue(`\n📊 Inventaire sauvegardé dans: ${csvPath}`));
+    console.log(
+      chalk.gray(
+        `   • ${allData.length} entrées totales (${csvData.length} nouvelles/modifiées)`
+      )
+    );
   }
 }
 
@@ -193,7 +309,8 @@ async function createCSVFile(filePath, headers, data) {
               typeof value === "string" &&
               (value.includes(",") ||
                 value.includes('"') ||
-                value.includes("\n"))
+                value.includes("\n") ||
+                value.includes("\r"))
             ) {
               return `"${value.replace(/"/g, '""')}"`;
             }

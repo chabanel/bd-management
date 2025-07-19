@@ -13,7 +13,7 @@ const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
 /**
  * Extrait les métadonnées d'un fichier PDF
  */
-async function extractPDFMetadata(filePath) {
+async function extractPDFMetadata(filePath, pageNumber = 2) {
   try {
     const dataBuffer = await fs.readFile(filePath);
     const data = await pdfParse(dataBuffer);
@@ -37,15 +37,6 @@ async function extractPDFMetadata(filePath) {
       metadata.producer = data.info.Producer || "";
     }
 
-    // Si pas de métadonnées, essayer d'extraire du nom de fichier
-    if (!metadata.title || !metadata.author) {
-      const fileName = path.basename(filePath, ".pdf");
-      const extracted = extractFromFileName(fileName);
-
-      if (!metadata.title) metadata.title = extracted.title;
-      if (!metadata.author) metadata.author = extracted.author;
-    }
-
     // Si on a analysé avec Claude mais pas trouvé de titre, ne pas utiliser le nom de fichier
     if (metadata.confidence > 0 && !metadata.title) {
       metadata.title = "";
@@ -67,7 +58,7 @@ async function extractPDFMetadata(filePath) {
       );
 
       // Extraire une page en image
-      const imageResult = await extractPageImage(filePath, 2);
+      const imageResult = await extractPageImage(filePath, pageNumber);
 
       if (imageResult) {
         const imagePath = imageResult.path;
@@ -141,12 +132,6 @@ async function extractPDFMetadata(filePath) {
                   metadata.isbn = isbn;
                 }
               }
-              if (raw.metadata && raw.metadata.price) {
-                metadata.price = raw.metadata.price;
-              }
-              if (raw.notes) {
-                metadata.notes = raw.notes;
-              }
               metadata.confidence = claudeResult.confidence;
             }
 
@@ -168,19 +153,12 @@ async function extractPDFMetadata(filePath) {
             if (
               metadata.series &&
               !metadata.author &&
-              metadata.series !== metadata.author &&
-              metadata.series !== "Rebecca" // Cas spécial pour Hot Moms où Rebecca est l'auteur
+              metadata.series !== metadata.author
             ) {
               // Dans certains cas, Claude met l'auteur dans "series" au lieu de "authors"
               // Si on a une série mais pas d'auteur, utiliser la série comme auteur
               metadata.author = metadata.series;
               metadata.series = ""; // Vider la série car c'était en fait l'auteur
-            }
-
-            // Cas spécial pour Hot Moms où Rebecca est l'auteur
-            if (metadata.series === "Rebecca" && !metadata.author) {
-              metadata.author = "Rebecca";
-              metadata.series = "";
             }
           } else {
             console.log(
